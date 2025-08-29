@@ -1,20 +1,18 @@
 pipeline {
   agent any
 
-  options { timestamps() }
-
   environment {
     PYTHON = 'python3'
     VENV_DIR = '.venv'
   }
 
-  // Webhook triggers the job (keep the checkbox in the job too)
+  // your webhook will trigger; keep this for GitHub integration
   triggers { githubPush() }
 
   stages {
     stage('Checkout') {
       steps {
-        // If your job is "Pipeline script from SCM", prefer checkout scm:
+        // uses the repo this job is tied to
         checkout scm
         sh 'git rev-parse --short HEAD'
       }
@@ -27,7 +25,7 @@ pipeline {
           if [ ! -d "${VENV_DIR}" ]; then ${PYTHON} -m venv ${VENV_DIR}; fi
           . ${VENV_DIR}/bin/activate
           python -m pip install --upgrade pip
-          # Optional: if you later add requirements.txt, they’ll be installed:
+          pip install pytest
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         '''
       }
@@ -55,13 +53,7 @@ pipeline {
           set -e
           . ${VENV_DIR}/bin/activate
           mkdir -p reports
-          # If pytest is present, use it (nicer JUnit); otherwise unittest
-          if python -c "import pkgutil; import sys; sys.exit(0 if pkgutil.find_loader('pytest') else 1)"; then
-            pytest -q --junitxml=reports/junit.xml || true
-          else
-            python -m unittest discover -v || true
-            # Produce a minimal JUnit if you want; for now we rely on console logs
-          fi
+          pytest -q --junitxml=reports/junit.xml
         '''
       }
     }
@@ -69,7 +61,7 @@ pipeline {
 
   post {
     always {
-      // If pytest ran, publish JUnit; if not present, this step quietly skips
+      // publish test report to Jenkins UI
       junit allowEmptyResults: true, testResults: 'reports/**/*.xml'
       archiveArtifacts artifacts: 'reports/**/*.xml', allowEmptyArchive: true
     }
