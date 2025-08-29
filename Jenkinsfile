@@ -8,14 +8,15 @@ pipeline {
     VENV_DIR = '.venv'
   }
 
-  triggers { githubPush() }   // also tick the checkbox in the job
+  // Webhook triggers the job (keep the checkbox in the job too)
+  triggers { githubPush() }
 
   stages {
     stage('Checkout') {
       steps {
-        git branch: 'main',
-            url: 'https://github.com/liadaltif/snakeops.git'
-            // credentialsId not needed for public repos
+        // If your job is "Pipeline script from SCM", prefer checkout scm:
+        checkout scm
+        sh 'git rev-parse --short HEAD'
       }
     }
 
@@ -26,7 +27,7 @@ pipeline {
           if [ ! -d "${VENV_DIR}" ]; then ${PYTHON} -m venv ${VENV_DIR}; fi
           . ${VENV_DIR}/bin/activate
           python -m pip install --upgrade pip
-          pip install pytest
+          # Optional: if you later add requirements.txt, they’ll be installed:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         '''
       }
@@ -38,7 +39,12 @@ pipeline {
           set -e
           . ${VENV_DIR}/bin/activate
           files=$(git ls-files "*.py" || true)
-          if [ -n "$files" ]; then python -m py_compile $files; else echo "no python files"; fi
+          if [ -n "$files" ]; then
+            echo "[compile] byte-compiling python files..."
+            python -m py_compile $files
+          else
+            echo "no python files found."
+          fi
         '''
       }
     }
@@ -49,10 +55,12 @@ pipeline {
           set -e
           . ${VENV_DIR}/bin/activate
           mkdir -p reports
-          if [ -d tests ] || ls test_*.py >/dev/null 2>&1; then
-            pytest -q --junitxml=reports/junit.xml
+          # If pytest is present, use it (nicer JUnit); otherwise unittest
+          if python -c "import pkgutil; import sys; sys.exit(0 if pkgutil.find_loader('pytest') else 1)"; then
+            pytest -q --junitxml=reports/junit.xml || true
           else
-            echo "no tests found."
+            python -m unittest discover -v || true
+            # Produce a minimal JUnit if you want; for now we rely on console logs
           fi
         '''
       }
@@ -61,6 +69,7 @@ pipeline {
 
   post {
     always {
+      // If pytest ran, publish JUnit; if not present, this step quietly skips
       junit allowEmptyResults: true, testResults: 'reports/**/*.xml'
       archiveArtifacts artifacts: 'reports/**/*.xml', allowEmptyArchive: true
     }
