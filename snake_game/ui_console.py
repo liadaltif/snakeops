@@ -39,7 +39,7 @@ def main():
         if move[0] == 'w':
             g.change_direction(Direction.UP)
         
-        if move[0] == 'i':
+        if move[0] == 'k':
             g.change_direction(Direction.UP)
 
         if move[0] == 'p':
