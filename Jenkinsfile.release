@@ -5,12 +5,12 @@ pipeline {
     PYTHON   = 'python3'
     VENV_DIR = '.venv'
     // change these if your Artifactory URL/repo are different
-    JF_URL  = 'http://artifactory:8082/artifactory'
+    JF_URL   = 'http://artifactory:8082/artifactory'
     JF_REPO  = 'snake-dev'
   }
 
   parameters {
-    string(name: 'VERSION', defaultValue: '0.1.0', description: 'Release version, e.g. 0.1.0')
+    string(name: 'VERSION', defaultValue: '0.1.0', description: 'Release version (used when no tag is present)')
     choice(name: 'TARGET_OS', choices: ['linux','windows'], description: 'Executable target OS')
   }
 
@@ -30,7 +30,6 @@ pipeline {
           . ${VENV_DIR}/bin/activate
           python -m pip install --upgrade pip
           pip install pyinstaller
-          # If you have Python deps, put them in requirements.txt
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         '''
       }
@@ -43,14 +42,11 @@ pipeline {
           . ${VENV_DIR}/bin/activate
           rm -rf build dist
 
-          # Entry script of your game (change if different)
-          ENTRY="snake_game/ui_console.py"
+          ENTRY="snake_game/ui_console.py"   # <-- change if your entry is different
           NAME="snake"
 
-          # Build single-file exe/binary
           pyinstaller --onefile --name "${NAME}" "${ENTRY}"
 
-          # Decide artifact name by OS
           if [ "${TARGET_OS}" = "windows" ]; then
             ARTIFACT="dist/${NAME}.exe"
           else
@@ -70,14 +66,20 @@ pipeline {
           sh '''
             set -e
             . ./artifact.env
-            # Store under snakeops/<version>/
-            A_PATH="snakeops/${VERSION}/"
-            FILE=$(basename "${ARTIFACT}")
+
+            # Prefer the git tag as version; fall back to the VERSION param
+            REL="$(git describe --tags --exact-match 2>/dev/null || echo "${VERSION}")"
+
+            A_PATH="snakeops/${REL}/"
+            FILE="$(basename "${ARTIFACT}")"
+
             echo "Uploading ${FILE} to ${JF_URL}/${JF_REPO}/${A_PATH}${FILE}"
             curl -fsSL -H "X-JFrog-Art-Api: ${JF_API_KEY}" \
                  -T "${ARTIFACT}" \
                  "${JF_URL}/${JF_REPO}/${A_PATH}${FILE}"
+
             echo "${JF_URL}/${JF_REPO}/${A_PATH}${FILE}" > artifact_url.txt
+            echo "${REL}" > rel.txt
           '''
         }
       }
@@ -94,40 +96,32 @@ pipeline {
             # Download current index.json if exists; else start with []
             curl -fsSL -H "X-JFrog-Art-Api: ${JF_API_KEY}" "${INDEX_URL}" -o index.json || echo '[]' > index.json
 
-            # Compute sha256 of artifact
             . ./artifact.env
-            SHA=$(sha256sum "${ARTIFACT}" | awk '{print $1}')
+            REL="$(cat rel.txt)"
+            URL="$(cat artifact_url.txt)"
+            SHA="$(sha256sum "${ARTIFACT}" | awk '{print $1}')"
+            export REL URL SHA TARGET_OS
 
-            # Append/replace entry for this version+OS
-            python3 - <<'PY'
-import json, os, sys
-version = os.environ.get("VERSION")
-target  = os.environ.get("TARGET_OS")
-url     = open("artifact_url.txt").read().strip()
-idx = []
+            ${PYTHON} - <<'PY'
+import json, os
+# Read existing index
 try:
-    with open("index.json","r") as f:
+    with open('index.json','r') as f:
         idx = json.load(f)
 except Exception:
     idx = []
-# remove any existing same version+os
-idx = [e for e in idx if not (e.get("version")==version and e.get("os")==target)]
-idx.append({"version": version, "os": target, "url": url, "sha256": os.environ.get("SHA","")})
-with open("index.json","w") as f:
+entry = {
+    "version": os.environ.get("REL","0.0.0"),
+    "os": os.environ.get("TARGET_OS","linux"),
+    "url": os.environ.get("URL",""),
+    "sha256": os.environ.get("SHA","")
+}
+# Replace any existing entry with same (version, os)
+idx = [e for e in idx if not (e.get("version")==entry["version"] and e.get("os")==entry["os"])]
+idx.append(entry)
+with open('index.json','w') as f:
     json.dump(idx, f, indent=2)
-print("index.json updated with", version, target, url)
-PY
-            # Recompute SHA inside Python didn’t get env; so set and rerun quickly
-            python3 - <<'PY'
-import json, os, hashlib
-with open("index.json","r") as f:
-    idx = json.load(f)
-# ensure last entry has sha256 from shell var
-sha = os.popen("sha256sum $(. ./artifact.env; echo $ARTIFACT)").read().split()[0]
-if idx:
-    idx[-1]["sha256"] = sha
-with open("index.json","w") as f:
-    json.dump(idx, f, indent=2)
+print("index.json updated:", entry)
 PY
 
             # Upload updated index.json
@@ -142,8 +136,8 @@ PY
 
   post {
     success {
-      archiveArtifacts artifacts: 'dist/*,artifact.env,artifact_url.txt,index.json', allowEmptyArchive: true
-      echo "Release ${VERSION} for ${params.TARGET_OS} published."
+      archiveArtifacts artifacts: 'dist/*,artifact.env,artifact_url.txt,rel.txt,index.json', allowEmptyArchive: true
+      echo "Release complete."
     }
   }
 }
