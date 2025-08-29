@@ -35,7 +35,11 @@ def main():
         if move[0] == 'q':
             print("Bye!")
             return
+        
         if move[0] == 'w':
+            g.change_direction(Direction.UP)
+        
+        if move[0] == 'i':
             g.change_direction(Direction.UP)
 
         if move[0] == 'p':
