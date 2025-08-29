@@ -1,7 +1,7 @@
 pipeline {
   agent any
 
-  options { ansiColor('xterm'); timestamps() }
+  options { timestamps() }
 
   environment {
     PYTHON = 'python3'
