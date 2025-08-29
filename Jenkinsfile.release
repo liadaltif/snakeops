@@ -5,7 +5,7 @@ pipeline {
     PYTHON   = 'python3'
     VENV_DIR = '.venv'
     // change these if your Artifactory URL/repo are different
-    JF_URL   = 'http://localhost:8082/artifactory'
+    JF_URL  = 'http://artifactory:8082/artifactory'
     JF_REPO  = 'snake-dev'
   }
 
