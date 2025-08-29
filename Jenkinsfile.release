@@ -1,0 +1,149 @@
+pipeline {
+  agent any
+
+  environment {
+    PYTHON   = 'python3'
+    VENV_DIR = '.venv'
+    // change these if your Artifactory URL/repo are different
+    JF_URL   = 'http://localhost:8082/artifactory'
+    JF_REPO  = 'snake-dev'
+  }
+
+  parameters {
+    string(name: 'VERSION', defaultValue: '0.1.0', description: 'Release version, e.g. 0.1.0')
+    choice(name: 'TARGET_OS', choices: ['linux','windows'], description: 'Executable target OS')
+  }
+
+  stages {
+    stage('Checkout') {
+      steps {
+        checkout scm
+        sh 'git rev-parse --short HEAD'
+      }
+    }
+
+    stage('Set up venv') {
+      steps {
+        sh '''
+          set -e
+          if [ ! -d "${VENV_DIR}" ]; then ${PYTHON} -m venv ${VENV_DIR}; fi
+          . ${VENV_DIR}/bin/activate
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          # If you have Python deps, put them in requirements.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        '''
+      }
+    }
+
+    stage('Build executable') {
+      steps {
+        sh '''
+          set -e
+          . ${VENV_DIR}/bin/activate
+          rm -rf build dist
+
+          # Entry script of your game (change if different)
+          ENTRY="snake_game/ui_console.py"
+          NAME="snake"
+
+          # Build single-file exe/binary
+          pyinstaller --onefile --name "${NAME}" "${ENTRY}"
+
+          # Decide artifact name by OS
+          if [ "${TARGET_OS}" = "windows" ]; then
+            ARTIFACT="dist/${NAME}.exe"
+          else
+            ARTIFACT="dist/${NAME}"
+          fi
+
+          echo "ARTIFACT=${ARTIFACT}" > artifact.env
+          echo "Built artifact: ${ARTIFACT}"
+          ls -la dist
+        '''
+      }
+    }
+
+    stage('Upload to Artifactory') {
+      steps {
+        withCredentials([string(credentialsId: 'jfrog-api-key', variable: 'JF_API_KEY')]) {
+          sh '''
+            set -e
+            . ./artifact.env
+            # Store under snakeops/<version>/
+            A_PATH="snakeops/${VERSION}/"
+            FILE=$(basename "${ARTIFACT}")
+            echo "Uploading ${FILE} to ${JF_URL}/${JF_REPO}/${A_PATH}${FILE}"
+            curl -fsSL -H "X-JFrog-Art-Api: ${JF_API_KEY}" \
+                 -T "${ARTIFACT}" \
+                 "${JF_URL}/${JF_REPO}/${A_PATH}${FILE}"
+            echo "${JF_URL}/${JF_REPO}/${A_PATH}${FILE}" > artifact_url.txt
+          '''
+        }
+      }
+    }
+
+    stage('Update index.json (release catalog)') {
+      steps {
+        withCredentials([string(credentialsId: 'jfrog-api-key', variable: 'JF_API_KEY')]) {
+          sh '''
+            set -e
+            INDEX_PATH="snakeops/index.json"
+            INDEX_URL="${JF_URL}/${JF_REPO}/${INDEX_PATH}"
+
+            # Download current index.json if exists; else start with []
+            curl -fsSL -H "X-JFrog-Art-Api: ${JF_API_KEY}" "${INDEX_URL}" -o index.json || echo '[]' > index.json
+
+            # Compute sha256 of artifact
+            . ./artifact.env
+            SHA=$(sha256sum "${ARTIFACT}" | awk '{print $1}')
+
+            # Append/replace entry for this version+OS
+            python3 - <<'PY'
+import json, os, sys
+version = os.environ.get("VERSION")
+target  = os.environ.get("TARGET_OS")
+url     = open("artifact_url.txt").read().strip()
+idx = []
+try:
+    with open("index.json","r") as f:
+        idx = json.load(f)
+except Exception:
+    idx = []
+# remove any existing same version+os
+idx = [e for e in idx if not (e.get("version")==version and e.get("os")==target)]
+idx.append({"version": version, "os": target, "url": url, "sha256": os.environ.get("SHA","")})
+with open("index.json","w") as f:
+    json.dump(idx, f, indent=2)
+print("index.json updated with", version, target, url)
+PY
+            # Recompute SHA inside Python didn’t get env; so set and rerun quickly
+            python3 - <<'PY'
+import json, os, hashlib
+with open("index.json","r") as f:
+    idx = json.load(f)
+# ensure last entry has sha256 from shell var
+sha = os.popen("sha256sum $(. ./artifact.env; echo $ARTIFACT)").read().split()[0]
+if idx:
+    idx[-1]["sha256"] = sha
+with open("index.json","w") as f:
+    json.dump(idx, f, indent=2)
+PY
+
+            # Upload updated index.json
+            curl -fsSL -H "X-JFrog-Art-Api: ${JF_API_KEY}" \
+                 -T "index.json" \
+                 "${INDEX_URL}"
+          '''
+        }
+      }
+    }
+  }
+
+  post {
+    success {
+      archiveArtifacts artifacts: 'dist/*,artifact.env,artifact_url.txt,index.json', allowEmptyArchive: true
+      echo "Release ${VERSION} for ${params.TARGET_OS} published."
+    }
+  }
+}
